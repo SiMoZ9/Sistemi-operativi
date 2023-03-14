@@ -1,2 +1,3 @@
-# Sistemi-operativi
-Codici di prova ed esercizi di sistemi operativi Tor Vergata. 
+# Sistemi Operativi
+POSIX examples and exercises for OS exam - Tor Vergata
+
