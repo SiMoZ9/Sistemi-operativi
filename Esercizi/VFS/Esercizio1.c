@@ -40,7 +40,7 @@ int main(int argc, char **argv){
 
     //Open /dev/urandom for reading
 
-    short filesize = atoi(argv[1]) * sizeof(short);
+    long filesize = atol(argv[1]) * sizeof(short);
 
     src = open("/dev/urandom", O_RDONLY);
     if(src == -1)
@@ -62,6 +62,8 @@ int main(int argc, char **argv){
         wr = write(dst, buffer, chuck);
         if(wr == -1)
             _abort(strerror(errno));
+
+        printf("Written %d bytes\n", chuck);
 
         filesize -= wr;
     }
