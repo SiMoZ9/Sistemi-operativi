@@ -26,6 +26,5 @@ int main(int argc, char **argv)
 
 	if(mmap(NULL, size*sizeof(size_t), PROT_WRITE, MAP_ANONYMOUS, fd, 0) == NULL)
 		_abort(strerror(errno));
-
 }
 
