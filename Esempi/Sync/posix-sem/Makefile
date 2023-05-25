@@ -10,6 +10,6 @@ test:
 pc_posix:
 	gcc $(src_pc) -o $(pc) -lpthread
 
-pc_posix_x86:
-	gcc $(src_pc) -o $(pc) -lpthread -D x86
+pc_posix_no_x86:
+	gcc $(src_pc) -o $(pc) -lpthread -D no_x86
 
