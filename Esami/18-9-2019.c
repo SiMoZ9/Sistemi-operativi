@@ -106,8 +106,6 @@ void *str_to_space(void *args){
 	
 		pthread_mutex_unlock(done+me);
 	}
-
-
 }
 
 
