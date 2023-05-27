@@ -34,6 +34,7 @@ figli.
 #include <fcntl.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
+#include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/types.h>
 
@@ -55,26 +56,71 @@ figli.
 #define PARENT 0
 
 int num_process;
+struct sembuf sops;
+
+char *shm_addr;
+char **mem;
+
+void post_sem (int semid, int num_sem) {
+
+	sops.sem_num = num_sem;
+	sops.sem_op = 1;
+	sops.sem_flg = 0;
+
+	if (semop(semid, &sops, 1) == -1)
+		handle_error("semop");
+}
+
+void wait_sem (int semid, int num_sem) {
+
+	sops.sem_num = num_sem;
+	sops.sem_op = -1;
+	sops.sem_flg = 0;
+
+	if (semop(semid, &sops, 1) == -1)
+		handle_error("semop");
+}
+
+
+void handler(int signo, siginfo_t *a, void *b){
+
+	int i;
+
+	printf("handler activated\n");
+
+	for (i=1; i < num_process; i++){	
+		shm_addr = mem[i];
+		while(strcmp(shm_addr,"\0")!=0){
+			printf("Il padre legge: %s",shm_addr);
+			shm_addr += strlen(shm_addr)+1;
+		}
+	}
+
+	exit(EXIT_SUCCESS);
+}
+
+void destroy_all(int semid, int shmid) {}
 
 int main(int argc, char **argv) {
 	
 	int shm_id, sem_id;
-	char *shm_addr;
-	void **mem = malloc(sizeof(void *) * PAGE_SIZE);
+	shm_addr = (char *)malloc(sizeof(char) * PAGE_SIZE); // indirizzo
+	mem = (char **)malloc(sizeof(char *) * PAGE_SIZE); // array degli indirizzi
 
 	pid_t pid;
 
 	FILE *fd;
 
-	key_t shm_key = IPC_PRIVATE;
-	key_t sem_key = IPC_PRIVATE;
+	key_t shm_key = 6868;
+	key_t sem_key = 3434;
 
-	struct sembuf sops;
-	
+	struct sigaction act;
+	sigset_t set;
+
 	num_process = argc;
 
 	if (argc < 2)
-		quit("Usage: ./prog <pathaname_1> ... <pathname_n>");
+		quit("Usage: ./prog pathaname_1 ... [pathname_n]");
 
 	/*	sem section	*/
 
@@ -82,7 +128,7 @@ int main(int argc, char **argv) {
 	if (sem_id == -1)
 	    handle_error("semget");
 	
-	if (semctl(sem_id, CHILD, SETVAL, 1) == -1)
+	if (semctl(sem_id, CHILD, SETVAL, num_process+1) == -1) //il figlio entra tante volte quanti sono i pathname
 		handle_error("semctl");
 
 	if (semctl(sem_id, PARENT, SETVAL, 0) == -1)
@@ -91,62 +137,47 @@ int main(int argc, char **argv) {
 	/*	main section */
 	pid = fork();
 
-	for (int i = 1; i < num_process; i++) {
-		mem[i] = mmap(NULL,PAGE_SIZE, PROT_READ|PROT_WRITE,MAP_ANONYMOUS|MAP_SHARED,0,0);
-		if (mem[i] == NULL)
-		    handle_error("mmap");
+	shm_id = shmget(shm_key, PAGE_SIZE, 0666 | IPC_CREAT);
 
+	if (shm_id == -1)
+	    handle_error("shmget");
+
+
+	for (int i = 1; i < argc; i++) {
+		mem[i] = shmat(shm_id, NULL, 0);
+		if (mem[i] == (void *)-1)
+		    handle_error("shmat");
+		
 		shm_addr = mem[i];
 
-		if (pid < 0) {
-			handle_error("fork");
-		} else if (pid == 0) {
-			fd = fopen(argv[i], "r");
-			sops.sem_num = CHILD;
-			sops.sem_op = -1;
-			sops.sem_flg = 0;
+		fd = fopen(argv[i], "r");
+        if (fd == NULL)
+            quit("Cannot open file");
 
-			if (semop(sem_id, &sops, 1) == -1)
-			    handle_error("semop");
+		if (pid == 0) {
+			wait_sem(sem_id, CHILD);
 
-			printf("Il figlio scrive in memoria condivisa\n");
-
-			while(fscanf(fd, "%s\n", shm_addr) != EOF) {
-			    printf("Letto: %s\n", shm_addr);
+            while (fscanf(fd, "%s\n", shm_addr)!= EOF) {
+				printf("Lettura: %s\n", shm_addr);
 				shm_addr += strlen(shm_addr)+1;
-			}
+            }
 
-			sops.sem_num = PARENT;
-			sops.sem_op = 1;
-			sops.sem_flg = 0;
-
-			if (semop(sem_id, &sops, 1) == -1)
-			    handle_error("semop"); 
-
+            fclose(fd);
+			post_sem(sem_id, PARENT);
 		}
 	}
+	
+	sigfillset(&set);
+
+	act.sa_sigaction = handler;
+	act.sa_mask = set;
+	act.sa_flags  = 0;
+
+	sigaction(SIGINT, &act,NULL);
 
 	if (pid > 0) {
-			sops.sem_num = PARENT;
-			sops.sem_op = -1;
-			sops.sem_flg = 0;
-
-			if (semop(sem_id, &sops, 1) == -1)
-			    handle_error("semop");
-
-			printf("Il padre legge dalla memoria condivisa: %s\n", shm_addr);
-			for (int i=1; i < num_process; i++){	
-				shm_addr = mem[i];
-				while(strcmp(shm_addr,"\0")!=0){
-					printf("%s\n",shm_addr);
-					shm_addr += strlen(shm_addr)+1;
-				}
-			}
-			sops.sem_num = CHILD;
-			sops.sem_op = 1;
-			sops.sem_flg = 0;
-
-			if (semop(sem_id, &sops, 1) == -1)
-			    handle_error("semop");
-		}
+		wait_sem(sem_id, PARENT);
+		while(1) pause();
+		post_sem(sem_id, CHILD);
+	}
 }
