@@ -65,6 +65,9 @@ struct sembuf sem_op;
 
 FILE *fp;
 
+int num_threads;
+
+
 void my_wait(int sem_id, int sem_num) {
     sem_op.sem_num = sem_num;
     sem_op.sem_op = -1;
@@ -87,16 +90,18 @@ void *thread_a(void *arg) {
 
     pthread_mutex_lock(ready);
 
+    printf("Scrivi qualcosa: ");
     if ( fgets((char *)arg, PAGE_SIZE, stdin) == NULL)
         handle_error("fgets");
 
-    pthread_mutex_unlock(done);
+    pthread_mutex_unlock(ready);
 }
 
 void *thread_b(void *arg) {
 
-    pthread_mutex_lock(done);
+    pthread_mutex_lock(ready);
 
+	printf("Il thread scrive sul file");
     if ( fprintf(fp, "%s\n", (char *)arg) == -1 )
         handle_error("fprintf");
 
@@ -107,22 +112,34 @@ int main(int argc, char **argv) {
 
     int shm_id, sem_id;
     key_t shm_key = 6868, sem_key = 3434;
-    long num_threads;
 
-    long i;
+    int i;
 
     pthread_t tid_a;
     pthread_t tid_b;
+ 
+    pid_t pid;
 
-    if (argc != 2)
-        quit("Usage: filename N");
+    if (argc != 3)
+        quit("Usage: ./prog filename N");
 
+    ready = malloc(argc * sizeof(pthread_mutex_t));
+    done = malloc(argc * sizeof(pthread_mutex_t));
+
+
+#ifdef debug
+    printf("filename: %s\n", argv[1]);
+    printf("N: %s\n", argv[2]);
+#endif
+
+
+    if ((fp = fopen(argv[1], "w+")) == NULL)
+        handle_error("Cannot open file");
+    
     num_threads = strtol(argv[2], NULL, 10);
 
-    if ((fp = fopen(argv[2], "w+")) == NULL)
-        handle_error("Cannot open file");
-
     
+
 
     shm_id = shmget(shm_key, PAGE_SIZE, 0666 | IPC_CREAT);
     if (shm_id == -1)
@@ -138,11 +155,53 @@ int main(int argc, char **argv) {
     if (sem_id == -1)
         handle_error("semget");
 
-    if ( semctl(sem_id, SEM_A, SETVAL, 0) == -1 || semctl(sem_id, SEM_B, SETVAL, 1) == -1 )
+    if ( semctl(sem_id, SEM_A, SETVAL, 1) == -1 || semctl(sem_id, SEM_B, SETVAL, 0) == -1 )
         handle_error("semctl");
 
 
+    pid = fork();
 
-    for (i = 0; i < num_threads; i++) {       
+
+    if (pthread_mutex_init(ready, NULL) != 0 || pthread_mutex_init(done, NULL) != 0)
+        handle_error("pthread_mutex_init");
+
+    if (pid > 0) {
+        my_wait(sem_id, SEM_A);
+
+        for (i = 0; i < num_threads; i++) {
+            if ( pthread_create(&tid_a, NULL, thread_a, (void *)shm_addr) != 0 )
+                handle_error("pthread_create");
+        }
+
+        i = 0;
+
+        while(i < num_threads) {
+            pthread_join(tid_a, NULL);
+        }
+        my_post(sem_id, SEM_B);
+
+    } else if (pid == 0) {
+
+        my_wait(sem_id, SEM_B);
+
+        for (i = 0; i < num_threads; i++) {
+            if ( pthread_create(&tid_b, NULL, thread_b, (void *)shm_addr) != 0 )
+                handle_error("pthread_create");
+        }
+
+        i = 0;
+
+        while(i < num_threads) {
+            pthread_join(tid_b, NULL);
+        }
+        		
+        my_post(sem_id, SEM_A);
+
     }
+
+    //semctl(sem_id, SEM_A, IPC_RMID, 0);
+   // semctl(sem_id, SEM_B, IPC_RMID, 0);
+
+    shmdt(shm_addr);
+    shmctl(shm_id, IPC_RMID, NULL);   
 }
