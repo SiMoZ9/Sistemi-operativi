@@ -25,6 +25,7 @@
     non piu' del 5% della capacita' di lavoro della CPU. 
 */
 
+#include <math.h>
 #ifndef __unix__
 
 #error "Cannot compile non non Unix systems"
@@ -56,11 +57,9 @@
 #define SEM_A 0
 #define SEM_B 1
 
-pthread_mutex_t *ready;
-pthread_mutex_t *done;
+char **mem;
 
-char *shm_addr;
-
+int sem_id1, sem_id2;
 struct sembuf sem_op;
 
 FILE *fp;
@@ -68,65 +67,72 @@ FILE *fp;
 int num_threads;
 
 
-void my_wait(int sem_id, int sem_num) {
-    sem_op.sem_num = sem_num;
-    sem_op.sem_op = -1;
-    sem_op.sem_flg = 0;
-
-    if (semop(sem_id, &sem_op, 1) == -1)
-        handle_error("semop");
-}
-
-void my_post(int sem_id, int sem_num) {
-    sem_op.sem_num = sem_num;
-    sem_op.sem_op = 1;
-    sem_op.sem_flg = 0;
-    
-    if (semop(sem_id, &sem_op, 1) == -1)
-        handle_error("semop");
-}
-
 void *thread_a(void *arg) {
 
-    pthread_mutex_lock(ready);
+    long th = (long) arg;
+    long i;
+    
+    sem_op.sem_num = i;
+    sem_op.sem_flg = 0;
 
-    printf("Scrivi qualcosa: ");
-    if ( fgets((char *)arg, PAGE_SIZE, stdin) == NULL)
-        handle_error("fgets");
+    while (1) {
 
-    pthread_mutex_unlock(ready);
+        sem_op.sem_op = -1;
+        if (semop(sem_id1, &sem_op, 1) == -1)
+            handle_error("semop");
+
+
+        printf("Scrivi qualcosa");
+        if (fgets(mem[i], PAGE_SIZE, stdin) == NULL)
+            handle_error("fgets");
+
+        sem_op.sem_op = 1;
+        if (semop(sem_id2, &sem_op, 1) == -1)
+            handle_error("semop");
+    }
 }
 
 void *thread_b(void *arg) {
 
-    pthread_mutex_lock(ready);
+    long th = (long) arg;
+    long i;
+    
+    sem_op.sem_num = i;
+    sem_op.sem_flg = 0;
 
-	printf("Il thread scrive sul file");
-    if ( fprintf(fp, "%s\n", (char *)arg) == -1 )
-        handle_error("fprintf");
+    while (1) {
 
-    pthread_mutex_unlock(ready);
+        sem_op.sem_op = -1;
+        if (semop(sem_id2, &sem_op, 1) == -1)
+            handle_error("semop");
+
+		printf("child worker - thread %d found string %s\n",i,mem[i]);
+		fprintf(fp,"%s\n", mem[i]);
+		fflush(fp);
+
+        sem_op.sem_op = 1;
+        if (semop(sem_id1, &sem_op, 1) == -1)
+            handle_error("semop");
+    }
 }
 
 int main(int argc, char **argv) {
 
-    int shm_id, sem_id;
-    key_t shm_key = 6868, sem_key = 3434;
+    int shm_id;
+    key_t shm_key = 6868;
 
-    int i;
-
-    pthread_t tid_a;
-    pthread_t tid_b;
+    long i;
  
     pid_t pid;
+
+    pthread_t tid_a, tid_b;
+
+    mem = (char **)malloc(sizeof(char *) * PAGE_SIZE);
 
     if (argc != 3)
         quit("Usage: ./prog filename N");
 
-    ready = malloc(argc * sizeof(pthread_mutex_t));
-    done = malloc(argc * sizeof(pthread_mutex_t));
-
-
+    
 #ifdef debug
     printf("filename: %s\n", argv[1]);
     printf("N: %s\n", argv[2]);
@@ -138,70 +144,73 @@ int main(int argc, char **argv) {
     
     num_threads = strtol(argv[2], NULL, 10);
 
-    
-
-
     shm_id = shmget(shm_key, PAGE_SIZE, 0666 | IPC_CREAT);
     if (shm_id == -1)
         handle_error("shmget");
 
-    shm_addr = shmat(shm_id, NULL, 0);
-    if (shm_addr == (void *) -1)
-        handle_error("shmat");
 
 
 
-    sem_id = semget(sem_key, 2, 0666 | IPC_CREAT);
-    if (sem_id == -1)
+
+    sem_id1 = semget(IPC_PRIVATE, num_threads, 0666 | IPC_CREAT);
+    if (sem_id1 == -1)
         handle_error("semget");
 
-    if ( semctl(sem_id, SEM_A, SETVAL, 1) == -1 || semctl(sem_id, SEM_B, SETVAL, 0) == -1 )
-        handle_error("semctl");
+    sem_id2 = semget(IPC_PRIVATE, num_threads, 0666 | IPC_CREAT);
+    if (sem_id2 == -1)
+        handle_error("semget");
 
 
-    pid = fork();
+    for (i = 0; i < num_threads; i++) {
+        mem[i] = shmat(shm_id, NULL, 0);
+        if (mem[i] == (void *) -1)
+            handle_error("shmat");
+    }
+
+    for (i = 0; i < num_threads; i++) {
+        if ( semctl(sem_id1, i, SETVAL, 1) )
+            handle_error("semctl");
+    }
+
+    for (i = 0; i < num_threads; i++) {
+        if ( semctl(sem_id2, i, SETVAL, 0) )
+            handle_error("semctl");
+    }
 
 
-    if (pthread_mutex_init(ready, NULL) != 0 || pthread_mutex_init(done, NULL) != 0)
-        handle_error("pthread_mutex_init");
+  pid = fork();
+  
 
     if (pid > 0) {
-        my_wait(sem_id, SEM_A);
 
         for (i = 0; i < num_threads; i++) {
-            if ( pthread_create(&tid_a, NULL, thread_a, (void *)shm_addr) != 0 )
+            if ( pthread_create(&tid_a, NULL, thread_a, (void *)i) != 0 )
                 handle_error("pthread_create");
         }
 
-        i = 0;
-
-        while(i < num_threads) {
-            pthread_join(tid_a, NULL);
-        }
-        my_post(sem_id, SEM_B);
+    
+        if ( pthread_join(tid_a, NULL) == -1)
+            handle_error("pthread_join");
 
     } else if (pid == 0) {
 
-        my_wait(sem_id, SEM_B);
-
         for (i = 0; i < num_threads; i++) {
-            if ( pthread_create(&tid_b, NULL, thread_b, (void *)shm_addr) != 0 )
+            if ( pthread_create(&tid_b, NULL, thread_b, (void *)i) != 0 )
                 handle_error("pthread_create");
         }
-
-        i = 0;
-
-        while(i < num_threads) {
-            pthread_join(tid_b, NULL);
-        }
-        		
-        my_post(sem_id, SEM_A);
-
+    
+        if ( pthread_join(tid_b, NULL) == -1)
+            handle_error("pthread_join");        
     }
+
+    while(1) pause();
 
     //semctl(sem_id, SEM_A, IPC_RMID, 0);
    // semctl(sem_id, SEM_B, IPC_RMID, 0);
 
-    shmdt(shm_addr);
-    shmctl(shm_id, IPC_RMID, NULL);   
+    for (i = 0; i < num_threads; i++)
+        shmdt(mem[i]);
+
+    shmctl(shm_id, IPC_RMID, NULL);
+
 }
