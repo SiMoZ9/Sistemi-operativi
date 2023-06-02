@@ -1,9 +1,5 @@
 all:
-	gcc 19-9-2018.c -o prog -lpthread
+	gcc 19-9-2018.c -o prog -lpthread -Wall -Wextra
 
-sema-mutex:
-	gcc sema.c -o prog -lpthread
-
-sema-sem:
-
-	gcc sema.c -o prog -lpthread -D sem_compile
+debug:
+	gcc 19-9-2018.c -o prog -lpthread -Wall -Wextra -D debug

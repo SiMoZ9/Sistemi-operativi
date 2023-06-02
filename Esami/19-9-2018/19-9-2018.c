@@ -1,27 +1,3 @@
-/*
-  SPECIFICATION TO BE IMPLEMENTED:
-  Implementare un programma che riceva in input tramite argv[] i pathname
-  associati ad N file (F1 ... FN), con N maggiore o uguale ad 1.
-  Per ognuno di questi file generi un thread che gestira' il contenuto del file.
-  Dopo aver creato gli N file ed i rispettivi N thread, il main thread dovra'
-  leggere indefinitamente la sequenza di byte provenienti dallo standard-input.
-  Ogni 5 nuovi byte letti, questi dovranno essere scritti da uno degli N thread
-  nel rispettivo file. La consegna dei 5 byte da parte del main thread
-  dovra' avvenire secondo uno schema round-robin, per cui i primi 5 byte
-  dovranno essere consegnati al thread in carico di gestire F1, i secondi 5
-  byte al thread in carico di gestire il F2 e cosi' via secondo uno schema
-  circolare.
-
-  L'applicazione dovra' gestire il segnale SIGINT (o CTRL_C_EVENT nel caso
-  WinAPI) in modo tale che quando il processo venga colpito esso dovra',
-  a partire dai dati correntemente memorizzati nei file F1 ... FN, ripresentare
-  sullo standard-output la medesima sequenza di byte di input originariamente
-  letta dal main thread dallo standard-input.
-
-  Qualora non vi sia immissione di input, l'applicazione dovra' utilizzare
-  non piu' del 5% della capacita' di lavoro della CPU.
-*/
-
 #ifndef __linux__
 
 #error "Cannot compile on non-Linux systems"
@@ -46,65 +22,155 @@
     exit(EXIT_FAILURE);                                                        \
   } while (0);
 
-pthread_mutex_t mutex;
-pthread_mutex_t lock;
+int num_td;
 
-char buffer[4096];
-int fd;
+char *buffer;
+int *files_back_arr;
+int *files;
+
+int sem;
+
 ssize_t wd;
 
-struct sembuf sops;
+#define BUFFER_SIZE 5
 
-void *pass(void *args) {
+void my_post(int semid, int semnum) {
+  struct sembuf ops;
 
-  long me = (int)args - 1;
+  ops.sem_op = 1;
+  ops.sem_num = semnum;
+  ops.sem_flg = 0;
 
-  pthread_mutex_lock(&lock);
+  if (semop(semid, &ops, 1) == -1)
+    error("semop");
+}
 
-  printf("Exec thread %d", me);
+void my_wait(int semid, int semnum) {
+  struct sembuf ops;
+
+  ops.sem_op = -1;
+  ops.sem_num = semnum;
+  ops.sem_flg = 0;
+
+  if (semop(semid, &ops, 1) == -1)
+    error("semop");
+}
+
+void handler(int dummy) {
+  int res;
+  int i;
+  int turn;
+
+  turn = 0;
 
   while (1) {
+    res = 0;
+    if ((res = read(files_back_arr[turn + 1], buffer, 5)) == -1)
+      error("read");
 
-    wd = write(fd, buffer, 5);
+    for (i = 0; i < res; i++)
+      putchar(buffer[i]);
+    fflush(stdout);
 
-    if (wd == -1)
-      error("write");
-
-    if (wd > 5) {
-      printf("Cannot write more than 5 bytes");
-      exit(EXIT_FAILURE);
+    if (res < 5) {
+      printf("\nDone\n");
+      fflush(stdout);
+      exit(EXIT_SUCCESS);
     }
 
-    pthread_mutex_unlock(&mutex);
+    turn = (turn + 1) % (num_td);
+  }
+}
+
+void *routine(void *args) {
+  long i = (long)args;
+
+  printf("thread %lu setup\n", i);
+  fflush(stdout);
+
+  while (1) {
+    my_wait(sem, i);
+    printf("thread %lu is operating\n", i);
+    fflush(stdout);
+
+    if (write(files[i], buffer, 5) == -1)
+      error("write");
+    my_post(sem, 0);
   }
 }
 
 int main(int argc, char **argv) {
-
-  sigset_t sig;
-  long i;
   pthread_t tid;
+  long i;
+  int turn;
 
-  if (argc < 2) {
-    printf("Usage: ./prog F1 [F2] ... [F2]");
-    exit(EXIT_FAILURE);
-  }
+  sigset_t set;
+  struct sigaction act;
 
-  pthread_mutex_init(&mutex, NULL);
-  pthread_mutex_init(&lock, NULL);
+  num_td = argc;
+  buffer = (char *)malloc(4096);
+
+  files_back_arr = (int *)malloc(sizeof(int) * argc);
+  files = (int *)malloc(sizeof(int) * argc);
+
+  sem = semget(IPC_PRIVATE, argc, IPC_CREAT | 0666);
+
+  if (sem == -1)
+    error("semget");
+
+  if (semctl(sem, 0, SETVAL, 1) == -1)
+    error("semctl");
 
   for (i = 1; i < argc; i++) {
-    if (pthread_create(&tid, NULL, pass, (void *)i) == -1)
-      error("pthread_create");
+    if (semctl(sem, i, SETVAL, 0) == -1)
+      error("semctl");
+  }
 
-    fd = open(argv[i], O_CREAT | O_TRUNC | O_RDWR, 0666);
-    if (fd == -1)
+  sigemptyset(&set);
+  sigfillset(&set);
+  sigaddset(&set, SIGINT);
+
+  sigprocmask(SIG_UNBLOCK, &set, NULL);
+
+  act.sa_handler = handler;
+  act.sa_mask = set;
+  act.sa_flags = SA_SIGINFO;
+  act.sa_restorer = 0;
+
+  for (i = 1; i < argc; i++) {
+
+    files[i] = open(argv[i], O_CREAT | O_RDWR | O_TRUNC, 0666);
+    files_back_arr[i] = open(argv[i], O_CREAT | O_RDWR | O_TRUNC, 0666);
+
+    if (files[i] == -1 || files_back_arr[i] == -1)
       error("open");
   }
+  for (i = 1; i < num_td; i++) {
+    if (pthread_create(&tid, NULL, routine, (void *)i))
+      error("pthread_create");
+  }
+
+  sigaction(SIGINT, &act, NULL);
+
+  turn = 0;
 
   while (1) {
-    pthread_mutex_lock(&mutex);
-    scanf("%ms", buffer);
-    pthread_mutex_unlock(&lock);
+
+    my_wait(sem, 0);
+
+    for (i = 0; i < 5; i++)
+      buffer[i] = getchar();
+
+    my_post(sem, turn + 1);
+
+    turn = (turn + 1) % (argc - 1);
   }
+
+  free(buffer);
+  free(files_back_arr);
+
+  for (i = 1; i < argc; i++)
+    close(files[i]);
+
+  free(files);
 }
