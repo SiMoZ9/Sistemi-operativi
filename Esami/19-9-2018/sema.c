@@ -27,10 +27,18 @@ int sem_a; // semaforo di regolazione agli accessi
 
 int fd;
 int num_td;
+int fs;
 
 char *buffer;
 
+pthread_mutex_t *mutex;
+pthread_mutex_t *access_m; // regola gli accessi
+
 ssize_t wd;
+
+#define BUFFER_SIZE 5
+
+#ifdef sem_compile
 
 void my_post(int semid, int semnum) {
   struct sembuf ops;
@@ -54,80 +62,72 @@ void my_wait(int semid, int semnum) {
     error("semop");
 }
 
+#else
+
 void *routine(void *args) {
   long i = (long)args;
 
-  my_wait(sem_a, i);
+  int chunk = BUFFER_SIZE;
 
-  printf("Hi i'm thread %lu", i);
+  printf("thread %lu setup\n", i);
+  fflush(stdout);
+
+  printf("thread %lu is operating\n", i);
   fflush(stdout);
 
   while (1) {
+    pthread_mutex_lock(access_m + i);
+    wd = write(fd, buffer, chunk + 5);
 
-    my_wait(sem_m, 0);
-
-    // wd = write(fd, buffer, 5);
-
-    if (wd == -1)
-      error("write");
-
-    my_post(sem_m, 0);
-  }
-  if (i < num_td - 1) {
-    my_post(sem_a, i + 1);
-  } else {
-    my_post(sem_a, num_td - i + 1);
+    if (i >= num_td)
+      i = 0;
+    pthread_mutex_unlock(mutex + i + 1);
+    pthread_mutex_unlock(access_m + i + 1);
   }
 }
 
 int main(int argc, char **argv) {
-
-  int i;
   pthread_t tid;
+  long i;
 
   num_td = argc;
   buffer = (char *)malloc(4096);
 
-  if (argc < 2) {
-    printf("Usage: ./prog F1 F2 ... [Fn]");
-    exit(-1);
-  }
+  // mutex init
 
-  /******************************************************************************************************************/
-
-  sem_m = semget(IPC_PRIVATE, 1, IPC_CREAT | 0666);
-  sem_a = semget(IPC_PRIVATE, num_td, IPC_CREAT | 0666);
-
-  if (sem_a == -1 || sem_m == -1)
-    error("semget");
-
-  if (semctl(sem_m, 0, SETVAL, 1) == -1)
-    error("semctl");
-
-  semctl(sem_a, 1, SETVAL, 1);
-
-  for (i = 2; i < num_td; i++) {
-    if (semctl(sem_a, i, SETVAL, 0) == -1)
-      error("semctl");
-  }
-
-  /******************************************************************************************************************/
+  mutex = (pthread_mutex_t *)malloc(4000);
+  access_m = (pthread_mutex_t *)malloc(4000);
 
   for (i = 0; i < num_td; i++) {
-    if (pthread_create(&tid, NULL, routine, (void *)i) != 0)
-      error("pthread_create");
+    if (pthread_mutex_init(access_m + i, NULL))
+      error("pthread_mutex_init");
+
+    pthread_mutex_init(mutex + i, NULL);
+    // pthread_mutex_lock(access_m + i);
   }
 
-  /******************************************************************************************************************/
-  for (i = 1; i < num_td; i++) {
-    fd = open(argv[i], O_CREAT | O_TRUNC | O_RDWR, 0666);
+  printf("Scrivi qualcosa: ");
+  fs = read(STDIN_FILENO, buffer, 4096);
+  printf("%d\n\n\n", fs);
+  // threads creation
 
-    if (fd < 0)
+  for (i = 1; i < num_td; i++) {
+    if (pthread_create(&tid, NULL, routine, (void *)i))
+      error("pthread_create");
+
+    fd = open(argv[i], O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    if (fd == -1)
       error("open");
   }
 
-  while (1) {
-    pthread_join(tid, NULL);
-    close(fd);
-  }
+  pthread_mutex_lock(mutex);
+
+  pthread_join(tid, NULL);
+
+  pthread_mutex_unlock(access_m);
+
+  free(mutex);
+  free(access_m);
+  free(buffer);
 }
+#endif
