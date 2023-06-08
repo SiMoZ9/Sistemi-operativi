@@ -51,31 +51,73 @@
 
 #ifdef __mutex_var
 
-pthread_mutex_t *read;
-pthread_mutex_t *write;
+pthread_mutex_t *reader;
+pthread_mutex_t *writer;
 
 #endif
 
 #ifdef __sem_var
 
-sem_t *read;
-sem_t *write;
+sem_t *reader;
+sem_t *writer;
 
 #endif
 
-FILE *f;
-char *buffer;
-char **rec_buffers;
+char **buffer;
+
+FILE *output;
+FILE **files;
+
+char **argv_names;
 
 int num_td;
 
 void handler(int dummy) {}
 
-void *td_func(void *args) {}
+void *td_func(void *args) {
+
+  long me = (long)args;
+  printf("thread %lu is setting up\n", me);
+  fflush(stdout);
+
+  FILE *fp;
+  fp = fopen(argv_names[me], "w+");
+
+  if (fp == NULL)
+    error("fopen");
+
+  while (1) {
+#ifdef __mutex_var
+    if (pthread_mutex_lock(reader + me))
+      error("pthread_mutex_lock");
+
+    printf("thread %lu is writing its string on file %s\n", me, buffer[me]);
+    fprintf(output, "%s\n", buffer[me]);
+    fflush(output);
+
+    if (pthread_mutex_unlock(writer + me))
+      error("pthread_mutex_lock");
+#endif
+
+#ifdef __sem_var
+
+    sem_wait(reader + me);
+
+    printf("thread %lu is writing its string on file %s\n", me, buffer[me]);
+    fprintf(output, "%s\n", buffer[me]);
+    fflush(output);
+
+    sem_post(writer + me);
+#endif
+  }
+}
 
 int main(int argc, char **argv) {
 
   int i;
+  int ret;
+
+  char *p;
 
   if (argc < 2) {
     printf("Usage: ./prog F1 [F2] ... [Fn]");
@@ -85,29 +127,47 @@ int main(int argc, char **argv) {
   num_td = argc - 1;
   pthread_t tid;
 
+  buffer = (char **)malloc(4096);
+  argv_names = (char **)malloc(sizeof(argv));
+  files = (FILE **)malloc(sizeof(FILE *) * num_td);
+
+  argv_names = argv + 1;
+
+  output = fopen("output.txt", "w+");
+  if (output == NULL)
+    error("fopen");
+
 #ifdef __mutex_var
 
-  read = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
-  write = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+  reader = malloc(sizeof(pthread_mutex_t) * argc);
+  writer = malloc(sizeof(pthread_mutex_t) * argc);
 
-  if (read == NULL || write == NULL)
+  if (reader == NULL || writer == NULL)
     error("malloc");
 
-  if (pthread_mutex_init(read, NULL) || pthread_mutex_init(write, NULL))
-    error("pthread_mutex_init");
+  for (i = 0; i < num_td; i++) {
+    if (pthread_mutex_init(reader + i, NULL) ||
+        pthread_mutex_init(writer + i, NULL) || pthread_mutex_lock(reader + i))
+      error("pthread_mutex_init");
+  }
 
 #endif
 
 #ifdef __sem_var
 
-  read = (sem_t *)malloc(sizeof(sem_t) * argc);
-  write = (sem_t *)malloc(sizeof(sem_t) * argc);
+  reader = (sem_t *)malloc(sizeof(sem_t) * argc);
+  writer = (sem_t *)malloc(sizeof(sem_t) * argc);
 
-  if (read == NULL || write == NULL)
+  if (reader == NULL || writer == NULL)
     error("malloc");
 
-  if (sem_init(read, 0, 1) || sem_init(write, 0, 0))
-    error("sem_init");
+  for (i = 0; i < num_td; i++) {
+
+    if (sem_init(reader + i, 0, 1) || sem_init(writer + i, 0, 0))
+      error("sem_init");
+
+    sem_wait(reader + i);
+  }
 
 #endif
 
@@ -116,6 +176,31 @@ int main(int argc, char **argv) {
       error("pthread_create");
   }
 
+  int turn = 0;
   while (1) {
+    ret = scanf("%ms", &p);
+
+#ifdef __mutex_var
+    pthread_mutex_lock(writer + turn);
+#endif
+
+#ifdef __sem_var
+    sem_wait(writer + turn);
+#endif
+
+    if (ret == -1 || errno == EINTR)
+      error("scanf");
+
+    buffer[turn] = p;
+
+#ifdef __sem_var
+    sem_post(reader + turn);
+#endif
+
+#ifdef __mutex_var
+    pthread_mutex_unlock(reader + turn);
+#endif
+
+    turn = (turn + 1) % (num_td);
   }
 }
