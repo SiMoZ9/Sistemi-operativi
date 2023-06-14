@@ -22,11 +22,12 @@
 #include <fcntl.h>
 
 #include "../lib/sem_tools.h"
-#include <semaphore.h>
 #include <signal.h>
+#include <sys/ipc.h>
 #include <sys/sem.h>
-#include <sys/stat.h>
+#include <sys/shm.h>
 #include <sys/wait.h>
+
 #include <unistd.h>
 #else
 #error
@@ -44,24 +45,48 @@
   } while (0)
 
 char *buffer;
-char *aux_buffer;
 
 int sem_a;
-int sem_b;
+int shmid;
 
 int fd;
-int shadow_fd;
+int fds;
+int rd, wr;
+char **args;
 
-void handler(int dummy) {}
+int child_pid;
+
+void handler(int dummy) {
+
+  if (getpid() == child_pid)
+    kill(child_pid, SIGTERM);
+
+  close(fd);
+  close(fds);
+
+#ifdef debug
+
+  int size = lseek(fds, 0, SEEK_END);
+  printf("%d\n", size);
+#endif
+
+  printf("\n\n\nhandler activated\n\n");
+
+  fds = open(args[2], O_RDONLY);
+
+  char aux[100];
+
+  while ((rd = read(fds, aux, 100)) > 0)
+    printf("%s", aux);
+
+  exit(1);
+}
 
 int main(int argc, char **argv) {
 
   pid_t pid;
   sigset_t set;
-
-  int rd, wr;
-
-  struct stat st;
+  struct sigaction act;
 
   if (argc != 3) {
     printf("missing filename\n");
@@ -69,15 +94,26 @@ int main(int argc, char **argv) {
     exit(-1);
   }
 
-  buffer = (char *)malloc(4096);
-  aux_buffer = (char *)malloc(4096);
-  if (buffer == NULL || aux_buffer == NULL)
-    __error("malloc");
+  args = (char **)malloc(sizeof(char *) * (argc));
 
-  fd = open(argv[1], O_CREAT | O_RDWR, 0666);
-  shadow_fd = open(argv[2], O_CREAT | O_RDWR, 0666);
-  if (fd == -1 || shadow_fd == -1)
+  args = argv;
+
+  sigemptyset(&set);
+  sigaddset(&set, SIGINT);
+  sigprocmask(SIG_UNBLOCK, &set, NULL);
+
+  fd = open(argv[1], O_CREAT | O_TRUNC | O_RDWR, 0666);
+  fds = open(argv[2], O_CREAT | O_TRUNC | O_RDWR, 0666);
+  if (fd == -1 || fds == -1)
     __error("open");
+
+  shmid = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0666);
+  if (shmid == -1)
+    __error("shmget");
+
+  buffer = shmat(shmid, NULL, SHM_W | SHM_R);
+  if (buffer == (void *)-1)
+    __error("shmat");
 
   sem_a = semget(IPC_PRIVATE, 2, IPC_CREAT | 0666);
   if (sem_a == -1)
@@ -90,44 +126,40 @@ int main(int argc, char **argv) {
   if (pid < 0)
     __error("fork");
 
-  if (pid == 0) {
-    my_wait(sem_a, 0);
-    printf("Child is executing\n");
-    fflush(stdout);
+  act.sa_mask = set;
+  act.sa_flags = SA_SIGINFO;
+  act.sa_handler = handler;
 
-    if (fgets(buffer, 4096, stdin) == NULL)
-      __error("fgets");
+  sigaction(SIGINT, &act, NULL);
 
-    write(fd, buffer, 4096);
-    my_post(sem_a, 1);
-  } else {
+  while (1) {
 
-    fstat(fd, &st);
-    int filesize = st.st_size;
+    if (pid == 0) {
+      child_pid = getpid();
+      my_wait(sem_a, 0);
+      printf("Child is executing\n");
+      fflush(stdout);
 
-    my_wait(sem_a, 1);
+      if (fgets(buffer, 4096, stdin) == NULL)
+        __error("fgets");
 
-    printf("Parent is writing\n");
-    fflush(stdout);
+      wr = write(fd, buffer, 4096);
+      if (wr == -1)
+        __error("write");
 
-    while (filesize != 0) {
+      my_post(sem_a, 1);
 
-      int chunk = 1000;
-      chunk = (filesize < chunk) ? filesize : chunk;
+    } else {
+      my_wait(sem_a, 1);
 
-      rd = read(fd, aux_buffer, chunk);
-      printf("cotoletta %s\n", aux_buffer);
-      if (rd == -1)
-        __error("read");
+      printf("Parent is executing %s\n", buffer);
+      fflush(stdout);
 
-      wr = write(shadow_fd, aux_buffer, chunk);
+      wr = write(fds, buffer, 100);
+      if (wr == -1)
+        __error("write");
 
-      filesize -= wr;
+      my_post(sem_a, 0);
     }
-
-    my_post(sem_a, 0);
   }
-
-  free(buffer);
-  free(aux_buffer);
 }
