@@ -52,9 +52,10 @@
     exit(EXIT_FAILURE);                                                        \
   } while (0)
 
-char **buffer;
-char buf[1024];
+char buffer[1024];
 char rd_buff[1024];
+
+char **buffer_strings;
 
 char *filename;
 
@@ -67,6 +68,22 @@ int wr, rd, rd_2;
 int sem;
 int msg;
 
+int count;
+int found;
+
+char *strrev(char *str) {
+  char *p1, *p2;
+
+  if (!str || !*str)
+    return str;
+  for (p1 = str, p2 = str + strlen(str) - 1; p2 > p1; ++p1, --p2) {
+    *p1 ^= *p2;
+    *p2 ^= *p1;
+    *p1 ^= *p2;
+  }
+  return str;
+}
+
 void handler(int dummy) {
 
   close(fd);
@@ -76,27 +93,31 @@ void handler(int dummy) {
 
   int size;
 
-  int count;
+  found = 0;
 
-  /*struct stat st;
-  stat(filename, &st);
-  size = st.st_size;
-*/
   fd = open(filename, O_RDONLY, 0666);
+  struct stat st;
+  stat(filename, &st);
 
   lseek(fd, 0, SEEK_CUR);
 
-  for (i = 0; i < num_proc; i++) {
+  for (i = 0; i < count; i++) {
     pid = fork();
+
+    size = st.st_size;
 
     if (pid == 0) {
       my_wait(sem, i);
 
-      printf("\n\nproc %d read %s", i, buffer[i]);
+      rd = read(fd, rd_buff, size);
+      printf("\n\nproc %d read %s", i, rd_buff);
       fflush(stdout);
 
-      my_post(sem, i + 1);
+      if (rd_buff == strrev(buffer_strings[i])) {
+        found++;
+      }
     }
+    my_post(sem, i + 1);
   }
 
   exit(1);
@@ -119,11 +140,9 @@ int main(int argc, char **argv) {
   }
 
   filename = (char *)malloc(sizeof(char *));
-
   filename = argv[1];
 
-  buffer = (char **)malloc(sizeof(char *) * 1024);
-  *buffer = (char *)malloc(4096);
+  buffer_strings = (char **)malloc(sizeof(char *) * num_proc);
 
   sigemptyset(&set);
   sigaddset(&set, SIGINT);
@@ -152,15 +171,16 @@ int main(int argc, char **argv) {
 
   sigaction(SIGINT, &act, NULL);
 
+  count = 0;
+
   while (1) {
-    for (int i = 0; i < num_proc; i++) {
 
-      fgets(buf, sizeof(buf), stdin);
+    fgets(buffer, sizeof(buffer), stdin);
 
-      if ((wr = write(fd, buf, sizeof(buf))) == -1)
-        error("fgets");
+    if ((wr = write(fd, buffer, sizeof(buffer))) == -1)
+      error("fgets");
 
-      buffer[i] = buf;
-    }
+    buffer_strings[count] = strndup(buffer, sizeof(buffer));
+    count++;
   }
 }
